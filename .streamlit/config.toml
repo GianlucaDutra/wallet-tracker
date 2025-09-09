@@ -1,0 +1,8 @@
+# .streamlit/config.toml
+[theme]
+base="dark"
+primaryColor="#22c55e"            # verde do botão
+backgroundColor="#0b1220"
+secondaryBackgroundColor="#121a2b"
+textColor="#e5e7eb"
+font="sans serif"

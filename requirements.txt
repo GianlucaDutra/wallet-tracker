@@ -1,0 +1,7 @@
+python-dotenv==1.0.1
+requests==2.32.3
+pandas==2.2.3
+streamlit==1.38.0
+python-telegram-bot==21.4
+tzdata==2025.1
+matplotlib==3.9.2
