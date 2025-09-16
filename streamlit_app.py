@@ -1,3 +1,4 @@
+# app.py
 import os
 import re
 import time
@@ -7,7 +8,7 @@ import streamlit as st
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 # ==========================
 # CONFIG INICIAL
@@ -25,6 +26,9 @@ if not COVALENT_API_KEY:
 
 HEADERS = {}
 
+# ==========================
+# CONSTANTES
+# ==========================
 EXPLORERS = {
     1:     "https://etherscan.io",
     56:    "https://bscscan.com",
@@ -54,86 +58,95 @@ DATE_PRESETS = {
     "Últimos 365 dias": 365,
     "Tudo (sem filtro de data)": None,
 }
+COINGECKO_PLATFORM = {
+    1: "ethereum",
+    56: "binance-smart-chain",
+    137: "polygon-pos",
+    42161: "arbitrum-one",
+    10: "optimistic-ethereum",
+    8453: "base",
+    43114: "avalanche",
+    250: "fantom",
+}
+DEX_CHAIN_SLUG = {
+    1: "ethereum",
+    56: "bsc",
+    137: "polygon",
+    42161: "arbitrum",
+    10: "optimism",
+    8453: "base",
+    43114: "avalanche",
+    250: "fantom",
+}
 
 # ==========================
-# SIDEBAR
+# REGEX & FORMATADORES
 # ==========================
-st.sidebar.title("⚙️ Configurações")
-st.sidebar.markdown(
-    """
-    <style>
-    section[data-testid="stSidebar"] .exec-btn button {
-        width: 100% !important;
-        background: linear-gradient(135deg, #0ea5e9, #22c55e) !important;
-        color: #fff !important;
-        border: 0 !important;
-        border-radius: 12px !important;
-        padding: 12px 16px !important;
-        font-weight: 700 !important;
-        font-size: 16px !important;
-        letter-spacing: .2px !important;
-        white-space: nowrap !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,.25) !important;
-        transition: transform .12s ease, filter .12s ease !important;
-    }
-    section[data-testid="stSidebar"] .exec-btn button:hover { transform: translateY(-1px) scale(1.01); }
-    section[data-testid="stSidebar"] .exec-btn button:active { transform: translateY(0) scale(.99); }
-    div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+_EVM_ADDR   = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_BTC_BECH32 = re.compile(r"^bc1[0-9ac-hj-np-z]{11,71}$", re.IGNORECASE)
+_BTC_BASE58 = re.compile(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$")
+_BTC_TXID   = re.compile(r"^[A-Fa-f0-9]{64}$")
 
-with st.sidebar.form("run_form", clear_on_submit=False):
-    address = st.text_input("Carteira (0x...)", value=st.session_state.get("address", ""), placeholder="0x...")
-    st.markdown('<div class="exec-btn">', unsafe_allow_html=True)
-    run = st.form_submit_button("▶️ Executar")
-    st.markdown("</div>", unsafe_allow_html=True)
+def is_evm_address(txt: str) -> bool:
+    return bool(_EVM_ADDR.fullmatch((txt or "").strip()))
 
-default_chains = [meta["name"] for meta in CHAINS.values()]
-selected_chain_names = st.sidebar.multiselect(
-    "Redes", default_chains, default=st.session_state.get("sel_chains", default_chains)
-)
-preset_label = st.sidebar.selectbox(
-    "Período para transações", list(DATE_PRESETS.keys()), index=st.session_state.get("preset_idx", 3)
-)
-min_usd = st.sidebar.number_input(
-    "Filtro mínimo (USD) p/ tokens e txs", min_value=0.0, value=float(st.session_state.get("min_usd", 0.0)), step=10.0
-)
-page_size = st.sidebar.slider("Página (linhas) de transações (por requisição)", 10, 200, int(st.session_state.get("page_size", 50)), 10)
-search_token = st.sidebar.text_input("🔍 Buscar token/nome (detalhamento)", value=st.session_state.get("search_token", ""))
+def is_btc_address(txt: str) -> bool:
+    t = (txt or "").strip()
+    return bool(_BTC_BECH32.fullmatch(t) or _BTC_BASE58.fullmatch(t))
 
-st.session_state["address"] = address
-st.session_state["sel_chains"] = selected_chain_names
-st.session_state["preset_idx"] = list(DATE_PRESETS.keys()).index(preset_label)
-st.session_state["min_usd"] = min_usd
-st.session_state["page_size"] = page_size
-st.session_state["search_token"] = search_token
+def is_btc_txid(txt: str) -> bool:
+    return bool(_BTC_TXID.fullmatch((txt or "").strip()))
 
-selected_chain_ids = [cid for cid, meta in CHAINS.items() if meta["name"] in selected_chain_names]
-
-# ==========================
-# HELPERS
-# ==========================
-def _since_dt(label: str):
-    days = DATE_PRESETS[label]
-    if days is None:
-        return None
-    return datetime.now(timezone.utc) - timedelta(days=days)
-
-def _human(ts: str) -> str:
+def _human_iso(ts: str) -> str:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return ts or ""
 
-def is_evm_address(txt: str) -> bool:
-    return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", (txt or "").strip()))
+def epoch_to_human(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "-"
+
+def fmt_usd(x: float, nd=2) -> str:
+    try:
+        return "$" + f"{float(x):,.{nd}f}"
+    except Exception:
+        return "$0.00"
+
+def fmt_usd_precise(x: float, nd=6) -> str:
+    try:
+        s = f"{float(x):,.{nd}f}".rstrip("0").rstrip(".")
+        return "$" + (s if s else "0")
+    except Exception:
+        return "$0"
+
+def fmt_amt(x: float, nd=8) -> str:
+    try:
+        return f"{float(x):,.{nd}f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
+
+def fmt_int(x) -> str:
+    try:
+        return f"{int(x):,}"
+    except Exception:
+        return "0"
+
+def _since_dt(label: str):
+    days = DATE_PRESETS[label]
+    if days is None:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=days)
 
 def to_checksum(addr: str) -> str:
     return (addr or "").strip()
 
+# ==========================
+# CACHES BÁSICOS
+# ==========================
 @st.cache_data(ttl=1800, show_spinner=False)
 def _url_exists(url: str) -> bool:
     try:
@@ -165,6 +178,9 @@ def get_logo_url(chain_id: int, contract_addr: str, covalent_logo: Optional[str]
                 return tw_url
     return None
 
+# ==========================
+# EVM (Covalent)
+# ==========================
 @st.cache_data(ttl=180, show_spinner=False)
 def get_balances(chain_id: int, addr: str, _nonce: int):
     url = f"https://api.covalenthq.com/v1/{chain_id}/address/{addr}/balances_v2/"
@@ -238,7 +254,7 @@ def normalize_txs(chain_id: int, items: list, addr: str) -> pd.DataFrame:
             axis=1
         )
         df["direction_chip"] = df["direction"].map({"IN":"⬇️ IN","OUT":"⬆️ OUT"}).fillna("↔️ OTHER")
-        df["timestamp_human"] = df["timestamp"].apply(_human)
+        df["timestamp_human"] = df["timestamp"].apply(_human_iso)
         df = df.sort_values("timestamp", ascending=False, ignore_index=True)
     return df
 
@@ -288,10 +304,118 @@ def covalent_wallet_tokens_fallback(chain_ids: list[int], address: str) -> pd.Da
     return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
 # ==========================
+# BTC APIs
+# ==========================
+@st.cache_data(ttl=120, show_spinner=False)
+def btc_address_summary(addr: str) -> Dict[str, Any]:
+    r = requests.get(f"https://mempool.space/api/address/{addr}", timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+@st.cache_data(ttl=120, show_spinner=False)
+def btc_address_txs(addr: str, limit=50) -> List[Dict[str, Any]]:
+    r = requests.get(f"https://mempool.space/api/address/{addr}/txs?limit={limit}", timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+@st.cache_data(ttl=120, show_spinner=False)
+def btc_tx_details(txid: str) -> Dict[str, Any]:
+    r = requests.get(f"https://mempool.space/api/tx/{txid}", timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_btc_price_usd() -> float:
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                         params={"ids": "bitcoin", "vs_currencies": "usd"},
+                         timeout=10, headers={"User-Agent":"TrackWallet/1.0"})
+        if r.ok:
+            v = (r.json() or {}).get("bitcoin", {}).get("usd")
+            if isinstance(v, (int, float)) and v > 0:
+                return float(v)
+    except Exception:
+        pass
+    try:
+        r = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=10)
+        if r.ok:
+            v = float((r.json() or {}).get("data", {}).get("amount", 0))
+            if v > 0:
+                return v
+    except Exception:
+        pass
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=10)
+        if r.ok:
+            v = float((r.json() or {}).get("price", 0))
+            if v > 0:
+                return v
+    except Exception:
+        pass
+    return 0.0
+
+# ==========================
+# SIDEBAR
+# ==========================
+st.sidebar.title("⚙️ Configurações")
+st.sidebar.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] .exec-btn button {
+        width: 100% !important;
+        background: linear-gradient(135deg, #0ea5e9, #22c55e) !important;
+        color: #fff !important;
+        border: 0 !important;
+        border-radius: 12px !important;
+        padding: 12px 16px !important;
+        font-weight: 700 !important;
+        font-size: 16px !important;
+        letter-spacing: .2px !important;
+        white-space: nowrap !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,.25) !important;
+        transition: transform .12s ease, filter .12s ease !important;
+    }
+    section[data-testid="stSidebar"] .exec-btn button:hover { transform: translateY(-1px) scale(1.01); }
+    section[data-testid="stSidebar"] .exec-btn button:active { transform: translateY(0) scale(.99); }
+    div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.sidebar.form("run_form", clear_on_submit=False):
+    address = st.text_input("Carteira (0x... ou bc1/1/3... ou TXID BTC)", value=st.session_state.get("address", ""))
+    st.markdown('<div class="exec-btn">', unsafe_allow_html=True)
+    run = st.form_submit_button("▶️ Executar")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+default_chains = [meta["name"] for meta in CHAINS.values()]
+selected_chain_names = st.sidebar.multiselect(
+    "Redes (EVM)", default_chains, default=st.session_state.get("sel_chains", default_chains)
+)
+preset_label = st.sidebar.selectbox(
+    "Período para transações", list(DATE_PRESETS.keys()), index=st.session_state.get("preset_idx", 3)
+)
+min_usd = st.sidebar.number_input(
+    "Filtro mínimo (USD) p/ tokens e txs", min_value=0.0, value=float(st.session_state.get("min_usd", 0.0)), step=10.0
+)
+page_size = st.sidebar.slider("Página (linhas) de transações (por requisição)", 10, 200, int(st.session_state.get("page_size", 50)), 10)
+search_token = st.sidebar.text_input("🔍 Buscar token/nome (detalhamento)", value=st.session_state.get("search_token", ""))
+
+st.session_state["address"] = address
+st.session_state["sel_chains"] = selected_chain_names
+st.session_state["preset_idx"] = list(DATE_PRESETS.keys()).index(preset_label)
+st.session_state["min_usd"] = min_usd
+st.session_state["page_size"] = page_size
+st.session_state["search_token"] = search_token
+
+selected_chain_ids = [cid for cid, meta in CHAINS.items() if meta["name"] in selected_chain_names]
+
+# ==========================
 # TÍTULO E ESTADO
 # ==========================
 st.title("🧭 Track Wallet Multichain (Single Wallet)")
-st.caption("Cole a carteira, clique em **Executar**, e use os filtros à esquerda.")
+st.caption("Cole a carteira (ou TXID BTC), clique em **Executar**, e use os filtros à esquerda.")
 
 if "run_nonce" not in st.session_state:
     st.session_state["run_nonce"] = 0
@@ -300,246 +424,338 @@ if run:
 
 show_wallet = bool(address.strip()) and st.session_state["run_nonce"] > 0
 if not address.strip():
-    st.info("Cole a carteira (0x...) e clique em **Executar** para ver o painel da carteira.")
+    st.info("Cole a carteira (0x... / bc1/1/3...) ou um TXID BTC e clique em **Executar** para ver o painel.")
 elif st.session_state["run_nonce"] == 0:
-    st.info("Clique em **Executar** para buscar os dados da carteira.")
+    st.info("Clique em **Executar** para buscar os dados.")
 
 # ==========================
-# PAINEL DA CARTEIRA
+# BTC DASHBOARD (MESMO LAYOUT)
+# ==========================
+def render_btc_dashboard(addr_or_txid: str):
+    if is_btc_txid(addr_or_txid):
+        st.subheader("📄 Detalhes da transação BTC")
+        try:
+            tx = btc_tx_details(addr_or_txid)
+            st.json(tx)
+        except Exception as e:
+            st.error(f"Erro ao buscar TX: {e}")
+        return
+
+    # endereço
+    try:
+        info = btc_address_summary(addr_or_txid)
+    except Exception as e:
+        st.error(f"BTC: {e}")
+        return
+
+    btc_price = get_btc_price_usd()
+    cs = info.get("chain_stats", {}) or {}
+    ms = info.get("mempool_stats", {}) or {}
+    confirmed = (cs.get("funded_txo_sum", 0) - cs.get("spent_txo_sum", 0))
+    mempool = (ms.get("funded_txo_sum", 0) - ms.get("spent_txo_sum", 0))
+    balance_btc = (confirmed + mempool) / 1e8
+    tx_count = int(cs.get("tx_count", 0)) + int(ms.get("tx_count", 0))
+
+    # KPIs
+    c1, c2, c3 = st.columns(3)
+    c1.metric("💰 Valor total (USD)", fmt_usd(balance_btc * btc_price, 2))
+    c2.metric("🪙 Nº de tokens", "1")
+    c3.metric("🔗 Nº de redes", "1")
+
+    # Distribuição por rede
+    st.markdown("### Distribuição por rede")
+    by_chain = pd.Series({"Bitcoin": balance_btc * btc_price})
+    total = float(by_chain.sum())
+    bdf = by_chain.reset_index().rename(columns={"index":"Rede", 0:"Valor (USD)"})
+    bdf["%"] = (bdf["Valor (USD)"] / total * 100).round(2) if total > 0 else 0
+    colA, colB = st.columns([0.45, 0.55])
+    with colA:
+        show_df = bdf.copy()
+        show_df["Valor (USD)"] = show_df["Valor (USD)"].apply(fmt_usd)
+        st.dataframe(
+            show_df, use_container_width=True, hide_index=True,
+            column_config={
+                "Valor (USD)": st.column_config.TextColumn("Valor (USD)"),
+                "%": st.column_config.NumberColumn("%", format="%.2f%%"),
+            },
+        )
+    with colB:
+        try:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(3.5, 3.5))
+            wedges, texts, autotexts = ax.pie(
+                bdf["Valor (USD)"],
+                labels=bdf["Rede"],
+                startangle=140,
+                autopct=lambda p: f"{p:.1f}%" if p >= 3 else "",
+                pctdistance=0.75,
+                wedgeprops=dict(width=0.35),
+                textprops={"fontsize": 9},
+            )
+            centre = plt.Circle((0, 0), 0.58, fc="white")
+            ax.add_artist(centre)
+            ax.axis("equal")
+            st.pyplot(fig, use_container_width=False)
+        except Exception:
+            st.info("Para ver o donut, instale:  `pip install matplotlib`")
+
+    # Tabela de tokens
+    st.subheader("💰 Tokens por Rede")
+    df_tok = pd.DataFrame([{
+        "Logo": "https://cryptologos.cc/logos/bitcoin-btc-logo.png?v=029",
+        "Ticker": "BTC",
+        "Nome": "Bitcoin",
+        "Contrato": "",
+        "Quantidade": balance_btc,
+        "Preço (USD)": btc_price,
+        "Valor (USD)": balance_btc * btc_price,
+        "Explorer": f"https://mempool.space/address/{addr_or_txid}",
+    }])
+    df_tok_fmt = df_tok.copy()
+    df_tok_fmt["Quantidade"] = df_tok_fmt["Quantidade"].apply(lambda v: fmt_amt(v, 8))
+    df_tok_fmt["Preço (USD)"] = df_tok_fmt["Preço (USD)"].apply(fmt_usd_precise)
+    df_tok_fmt["Valor (USD)"] = df_tok_fmt["Valor (USD)"].apply(fmt_usd)
+    st.dataframe(
+        df_tok_fmt, use_container_width=True, hide_index=True,
+        column_config={
+            "Logo": st.column_config.ImageColumn(""),
+            "Explorer": st.column_config.LinkColumn("Scan", display_text="Abrir"),
+        },
+    )
+
+    # Transações
+    st.subheader("🧾 Transações (BTC)")
+    try:
+        txs = btc_address_txs(addr_or_txid, limit=page_size)
+    except Exception as e:
+        st.warning(f"BTC TXs: {e}")
+        txs = []
+    rows = []
+    for t in txs:
+        txid = t.get("txid")
+        bt = t.get("status", {}).get("block_time")
+        rows.append({
+            "Rede": "Bitcoin",
+            "Tx": f"https://mempool.space/tx/{txid}" if txid else None,
+            "Data/Hora": epoch_to_human(bt) if bt else "",
+            "Direção": "", "De": "", "Para": "",
+            "Valor (USD)": fmt_usd(0, 2), "Taxa (USD)": fmt_usd(0, 4),
+        })
+    st.dataframe(
+        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+        column_config={
+            "Tx": st.column_config.LinkColumn("Hash", display_text="Abrir"),
+        },
+    )
+
+# ==========================
+# PAINEL DA CARTEIRA (EVM + BTC)
 # ==========================
 if show_wallet:
     nonce = st.session_state["run_nonce"]
     since_dt = _since_dt(preset_label)
 
-    with st.spinner("Buscando dados nas redes selecionadas..."):
-        tokens_all, txs_all = [], []
-        for cid in selected_chain_ids:
-            try:
-                bd = get_balances(cid, address, nonce)
-                dft = normalize_tokens(cid, bd)
-                if not dft.empty:
-                    tokens_all.append(dft)
-            except Exception as e:
-                st.warning(f"[{CHAINS[cid]['name']}] Tokens: {e}")
+    entry = address.strip()
 
-            try:
-                items = get_transactions_pages(cid, address, page_size=page_size, pages=3, _nonce=nonce)
-                dfx = normalize_txs(cid, items, address)
-                if not dfx.empty:
-                    txs_all.append(dfx)
-            except Exception as e:
-                st.warning(f"[{CHAINS[cid]['name']}] TXs: {e}")
+    # --- BTC?
+    if is_btc_address(entry) or is_btc_txid(entry):
+        render_btc_dashboard(entry)
+    # --- EVM?
+    elif is_evm_address(entry):
+        with st.spinner("Buscando dados nas redes selecionadas..."):
+            tokens_all, txs_all = [], []
+            for cid in selected_chain_ids:
+                try:
+                    bd = get_balances(cid, entry, nonce)
+                    dft = normalize_tokens(cid, bd)
+                    if not dft.empty:
+                        tokens_all.append(dft)
+                except Exception as e:
+                    st.warning(f"[{CHAINS[cid]['name']}] Tokens: {e}")
 
-    tokens_df_raw = pd.concat(tokens_all, ignore_index=True) if tokens_all else pd.DataFrame()
-    tx_df_raw = pd.concat(txs_all, ignore_index=True) if txs_all else pd.DataFrame()
+                try:
+                    items = get_transactions_pages(cid, entry, page_size=page_size, pages=3, _nonce=nonce)
+                    dfx = normalize_txs(cid, items, entry)
+                    if not dfx.empty:
+                        txs_all.append(dfx)
+                except Exception as e:
+                    st.warning(f"[{CHAINS[cid]['name']}] TXs: {e}")
 
-    tokens_df = tokens_df_raw[tokens_df_raw["value_usd"] >= float(min_usd)] if not tokens_df_raw.empty else pd.DataFrame()
-    if not tokens_df.empty and search_token.strip():
-        q = search_token.strip().lower()
-        tokens_df = tokens_df[
-            tokens_df["token"].str.lower().str.contains(q, na=False) |
-            tokens_df["name"].str.lower().str.contains(q, na=False)
-        ]
+        tokens_df_raw = pd.concat(tokens_all, ignore_index=True) if tokens_all else pd.DataFrame()
+        tx_df_raw = pd.concat(txs_all, ignore_index=True) if txs_all else pd.DataFrame()
 
-    tx_df = tx_df_raw.copy()
-    if not tx_df.empty:
-        if since_dt is not None:
-            tx_df["_dt"] = pd.to_datetime(tx_df["timestamp"], utc=True, errors="coerce")
-            tx_df = tx_df[tx_df["_dt"] >= since_dt].drop(columns=["_dt"])
-        if float(min_usd) > 0:
-            tx_df = tx_df[tx_df["value_usd"] >= float(min_usd)]
+        tokens_df = tokens_df_raw[tokens_df_raw["value_usd"] >= float(min_usd)] if not tokens_df_raw.empty else pd.DataFrame()
+        if not tokens_df.empty and search_token.strip():
+            q = search_token.strip().lower()
+            tokens_df = tokens_df[
+                tokens_df["token"].str.lower().str.contains(q, na=False) |
+                tokens_df["name"].str.lower().str.contains(q, na=False)
+            ]
 
-    # KPIs
-    c1, c2, c3, c4 = st.columns(4)
-    total_usd = float(tokens_df["value_usd"].sum()) if not tokens_df.empty else 0.0
-    c1.metric("💰 Valor total (USD)", f"${total_usd:,.2f}")
-    c2.metric("🪙 Nº de tokens", int(tokens_df.shape[0]) if not tokens_df.empty else 0)
-    c3.metric("🔗 Nº de redes", tokens_df["chain"].nunique() if not tokens_df.empty else 0)
-    c4.metric("🧾 TXs filtradas", int(tx_df.shape[0]) if not tx_df.empty else 0)
+        tx_df = tx_df_raw.copy()
+        if not tx_df.empty:
+            if since_dt is not None:
+                tx_df["_dt"] = pd.to_datetime(tx_df["timestamp"], utc=True, errors="coerce")
+                tx_df = tx_df[tx_df["_dt"] >= since_dt].drop(columns=["_dt"])
+            if float(min_usd) > 0:
+                tx_df = tx_df[tx_df["value_usd"] >= float(min_usd)]
 
-    # Distribuição por rede (Donut / Barra) — DONUT AINDA MENOR
-    if not tokens_df.empty:
-        st.markdown("### Distribuição por rede")
-        chart_type = st.radio(
-            "Tipo de gráfico",
-            ["Donut (recomendado)", "Barra horizontal"],
-            horizontal=True,
-            key="chart_type_chain",
-        )
-        by_chain = tokens_df.groupby("chain")["value_usd"].sum().sort_values(ascending=False)
-        total = float(by_chain.sum())
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        total_usd = float(tokens_df["value_usd"].sum()) if not tokens_df.empty else 0.0
+        c1.metric("💰 Valor total (USD)", fmt_usd(total_usd, 2))
+        c2.metric("🪙 Nº de tokens", int(tokens_df.shape[0]) if not tokens_df.empty else 0)
+        c3.metric("🔗 Nº de redes", tokens_df["chain"].nunique() if not tokens_df.empty else 0)
+        c4.metric("🧾 TXs filtradas", int(tx_df.shape[0]) if not tx_df.empty else 0)
 
-        if chart_type.startswith("Donut"):
-            try:
-                import matplotlib.pyplot as plt
-            except Exception:
-                plt = None
+        # Distribuição por rede
+        if not tokens_df.empty:
+            st.markdown("### Distribuição por rede")
+            chart_type = st.radio(
+                "Tipo de gráfico", ["Donut (recomendado)", "Barra horizontal"], horizontal=True, key="chart_type_chain",
+            )
+            by_chain = tokens_df.groupby("chain")["value_usd"].sum().sort_values(ascending=False)
+            total = float(by_chain.sum())
 
-            if plt is None:
-                st.info("Para ver o donut, instale:  `pip install matplotlib`")
+            if chart_type.startswith("Donut"):
+                try:
+                    import matplotlib.pyplot as plt
+                except Exception:
+                    plt = None
+
+                if plt is None:
+                    st.info("Para ver o donut, instale:  `pip install matplotlib`")
+                else:
+                    dfp = by_chain.reset_index().rename(columns={"chain": "Rede", "value_usd": "Valor"})
+                    dfp["pct"] = (dfp["Valor"] / total) * 100
+                    keep = dfp["pct"] >= 2.0
+                    donut_df = dfp.loc[keep, ["Rede", "Valor"]].copy()
+                    outras = float(dfp.loc[~keep, "Valor"].sum())
+                    if outras > 0:
+                        donut_df.loc[len(donut_df)] = ["Outras", outras]
+
+                    fig, ax = plt.subplots(figsize=(3.5, 3.5))
+                    wedges, texts, autotexts = ax.pie(
+                        donut_df["Valor"],
+                        labels=donut_df["Rede"],
+                        startangle=140,
+                        autopct=lambda p: f"{p:.1f}%" if p >= 3 else "",
+                        pctdistance=0.75,
+                        wedgeprops=dict(width=0.35),
+                        textprops={"fontsize": 9},
+                    )
+                    centre = plt.Circle((0, 0), 0.58, fc="white")
+                    ax.add_artist(centre)
+                    ax.axis("equal")
+                    st.pyplot(fig, use_container_width=False)
+
+                    aux = by_chain.reset_index().rename(columns={"chain":"Rede","value_usd":"Valor (USD)"})
+                    aux["%"] = (aux["Valor (USD)"] / total * 100).round(2)
+                    aux["Valor (USD)"] = aux["Valor (USD)"].apply(fmt_usd)
+                    st.dataframe(aux, use_container_width=True, hide_index=True)
             else:
-                dfp = by_chain.reset_index().rename(columns={"chain":"Rede","value_usd":"Valor"})
-                dfp["pct"] = (dfp["Valor"] / total) * 100
-                keep = dfp["pct"] >= 2.0
-                donut_df = dfp.loc[keep, ["Rede","Valor"]].copy()
-                outras = float(dfp.loc[~keep, "Valor"].sum())
-                if outras > 0:
-                    donut_df.loc[len(donut_df)] = ["Outras", outras]
+                bdf = by_chain.reset_index().rename(columns={"chain":"Rede","value_usd":"Valor (USD)"})
+                bdf["%"] = (bdf["Valor (USD)"] / total * 100).round(2)
+                colA, colB = st.columns([0.45, 0.55])
+                with colA:
+                    show = bdf.copy()
+                    show["Valor (USD)"] = show["Valor (USD)"].apply(fmt_usd)
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                with colB:
+                    norm = bdf.set_index("Rede")["Valor (USD)"]
+                    st.bar_chart(norm, use_container_width=True, height=340)
 
-                # 🔹 Figura menor (3.5 x 3.5) + donut fino
-                fig, ax = plt.subplots(figsize=(3.5, 3.5))
-                wedges, texts, autotexts = ax.pie(
-                    donut_df["Valor"],
-                    labels=donut_df["Rede"],
-                    startangle=140,
-                    autopct=lambda p: f"{p:.1f}%" if p >= 3 else "",
-                    pctdistance=0.75,           # aproxima o % do centro
-                    wedgeprops=dict(width=0.35),# donut mais fino
-                    textprops={"fontsize": 9},
-                )
-                centre = plt.Circle((0, 0), 0.58, fc="white")
-                ax.add_artist(centre)
-                ax.axis("equal")
-                st.pyplot(fig, use_container_width=False)
+        # Tabela de tokens
+        st.subheader("💰 Tokens por Rede")
+        top_n = st.slider("Mostrar Top N por rede", 3, 50, 15, 1)
+        if not tokens_df.empty:
+            summary = (tokens_df.groupby("chain")
+                       .agg(total_usd=("value_usd","sum"), qtd_tokens=("token","count"))
+                       .reset_index().sort_values("total_usd", ascending=False, ignore_index=True))
+            show_sum = summary.copy()
+            show_sum.rename(columns={"chain":"Rede","qtd_tokens":"Qtd. Tokens"}, inplace=True)
+            show_sum["total_usd"] = show_sum["total_usd"].apply(fmt_usd)
+            st.markdown("**Resumo por rede**")
+            st.dataframe(show_sum, use_container_width=True, hide_index=True)
 
-                aux = by_chain.reset_index().rename(columns={"chain":"Rede","value_usd":"Valor (USD)"})
-                aux["%"] = (aux["Valor (USD)"] / total * 100).round(2)
-                st.dataframe(
-                    aux, use_container_width=True, hide_index=True,
-                    column_config={
-                        "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-                        "%": st.column_config.NumberColumn("%", format="%.2f%%"),
-                    },
-                )
-        else:
-            bdf = by_chain.reset_index().rename(columns={"chain":"Rede","value_usd":"Valor (USD)"})
-            bdf["%"] = (bdf["Valor (USD)"] / total * 100).round(2)
-            colA, colB = st.columns([0.45, 0.55])
-            with colA:
-                st.dataframe(
-                    bdf, use_container_width=True, hide_index=True,
-                    column_config={
-                        "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-                        "%": st.column_config.NumberColumn("%", format="%.2f%%"),
-                    },
-                )
-            with colB:
-                norm = bdf.set_index("Rede")["Valor (USD)"]
-                st.bar_chart(norm, use_container_width=True, height=340)
+            st.markdown("**Detalhamento de tokens (separado por rede)**")
+            order = tokens_df.groupby("chain")["value_usd"].sum().sort_values(ascending=False).index.tolist()
+            tabs = st.tabs(order)
+            for tab, ch in zip(tabs, order):
+                with tab:
+                    raw = tokens_df[tokens_df["chain"] == ch].copy().sort_values("value_usd", ascending=False).head(top_n)
+                    def _scan_link(row):
+                        base = EXPLORERS.get(int(row["chain_id"]), "")
+                        return f"{base}/token/{row['token_address']}" if base and row["token_address"] else None
+                    raw["Explorer"] = raw.apply(_scan_link, axis=1)
+                    show = raw.rename(columns={
+                        "logo":"Logo","token":"Ticker","name":"Nome","token_address":"Contrato",
+                        "amount":"Quantidade","price_usd":"Preço (USD)","value_usd":"Valor (USD)",
+                    })[["Logo","Ticker","Nome","Contrato","Quantidade","Preço (USD)","Valor (USD)","Explorer"]]
+                    show["Quantidade"] = show["Quantidade"].apply(lambda v: fmt_amt(v, 8))
+                    show["Preço (USD)"] = show["Preço (USD)"].apply(fmt_usd_precise)
+                    show["Valor (USD)"] = show["Valor (USD)"].apply(fmt_usd)
+                    st.dataframe(show, use_container_width=True, hide_index=True,
+                                 column_config={
+                                     "Logo": st.column_config.ImageColumn(""),
+                                     "Explorer": st.column_config.LinkColumn("Scan", display_text="Abrir"),
+                                 })
 
-    # Tabela de tokens
-    st.subheader("💰 Tokens por Rede")
-    top_n = st.slider("Mostrar Top N por rede", 3, 50, 15, 1)
-    if not tokens_df.empty:
-        summary = (tokens_df.groupby("chain")
-                   .agg(total_usd=("value_usd","sum"), qtd_tokens=("token","count"))
-                   .reset_index().sort_values("total_usd", ascending=False, ignore_index=True))
-        st.markdown("**Resumo por rede**")
-        st.dataframe(summary, use_container_width=True, hide_index=True,
-                     column_config={
-                         "chain":"Rede",
-                         "total_usd": st.column_config.NumberColumn("Total (USD)", format="$%.2f"),
-                         "qtd_tokens": st.column_config.NumberColumn("Qtd. Tokens", format="%d"),
-                     })
-        st.markdown("**Detalhamento de tokens (separado por rede)**")
-        order = tokens_df.groupby("chain")["value_usd"].sum().sort_values(ascending=False).index.tolist()
-        tabs = st.tabs([f"{ch} ({int(summary.loc[summary['chain']==ch,'qtd_tokens'].values[0])})" if ch in summary['chain'].values else ch for ch in order])
-        for tab, ch in zip(tabs, order):
-            with tab:
-                raw = tokens_df[tokens_df["chain"] == ch].copy().sort_values("value_usd", ascending=False).head(top_n)
-                def _scan_link(row):
+        # Detalhe por token + TXs
+        st.subheader("🔎 Detalhe por token")
+        token_opts = tokens_df["token"].fillna("").unique().tolist() if not tokens_df.empty else []
+        sel_token = st.selectbox("Escolha um token (opcional)", ["(todos)"] + token_opts)
+        if sel_token != "(todos)" and not tokens_df.empty:
+            sel_rows = tokens_df[tokens_df["token"] == sel_token].copy()
+            st.write(f"Encontrados **{len(sel_rows)}** registros de **{sel_token}** em {sel_rows['chain'].nunique()} rede(s).")
+            addresses = set(sel_rows["token_address"].dropna().unique().tolist())
+            tx_sel = tx_df[tx_df["to"].str.lower().isin([a.lower() for a in addresses]) |
+                           tx_df["from"].str.lower().isin([a.lower() for a in addresses])] if not tx_df.empty else pd.DataFrame()
+            if not tx_sel.empty:
+                def _tx(row):
                     base = EXPLORERS.get(int(row["chain_id"]), "")
-                    return f"{base}/token/{row['token_address']}" if base and row["token_address"] else None
-                raw["Explorer"] = raw.apply(_scan_link, axis=1)
-                show = raw.rename(columns={
-                    "logo":"Logo","token":"Ticker","name":"Nome","token_address":"Contrato",
-                    "amount":"Quantidade","price_usd":"Preço (USD)","value_usd":"Valor (USD)",
-                })[["Logo","Ticker","Nome","Contrato","Quantidade","Preço (USD)","Valor (USD)","Explorer"]]
-                st.dataframe(show, use_container_width=True, hide_index=True, column_config={
-                    "Logo": st.column_config.ImageColumn(""),
-                    "Quantidade": st.column_config.NumberColumn("Quantidade", format="%.6f"),
-                    "Preço (USD)": st.column_config.NumberColumn("Preço (USD)", format="$%.6f"),
-                    "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-                    "Explorer": st.column_config.LinkColumn("Scan", display_text="Abrir"),
-                })
+                    return f"{base}/tx/{row['hash']}" if base and row["hash"] else None
+                tx_sel = tx_sel.copy()
+                tx_sel["Tx"] = tx_sel.apply(_tx, axis=1)
+                nice = tx_sel.rename(columns={
+                    "chain":"Rede","timestamp_human":"Data/Hora","direction_chip":"Direção",
+                    "from":"De","to":"Para","value_usd":"Valor (USD)","fees_usd":"Taxa (USD)"
+                })[["Rede","Tx","Data/Hora","Direção","De","Para","Valor (USD)","Taxa (USD)"]]
+                nice["Valor (USD)"] = nice["Valor (USD)"].apply(fmt_usd)
+                nice["Taxa (USD)"] = nice["Taxa (USD)"].apply(lambda v: fmt_usd(v, 4))
+                st.markdown("**Últimas transações desse token**")
+                st.dataframe(nice, use_container_width=True, hide_index=True,
+                             column_config={"Tx": st.column_config.LinkColumn("Hash", display_text="Abrir")})
+            else:
+                st.info("Sem transações recentes para esse token (dentro do período e redes filtradas).")
 
-    # Detalhe por token
-    st.subheader("🔎 Detalhe por token")
-    token_opts = tokens_df["token"].fillna("").unique().tolist() if not tokens_df.empty else []
-    sel_token = st.selectbox("Escolha um token (opcional)", ["(todos)"] + token_opts)
-    if sel_token != "(todos)" and not tokens_df.empty:
-        sel_rows = tokens_df[tokens_df["token"] == sel_token].copy()
-        st.write(f"Encontrados **{len(sel_rows)}** registros de **{sel_token}** em {sel_rows['chain'].nunique()} rede(s).")
-        addresses = set(sel_rows["token_address"].dropna().unique().tolist())
-        tx_sel = tx_df[tx_df["to"].str.lower().isin([a.lower() for a in addresses]) |
-                       tx_df["from"].str.lower().isin([a.lower() for a in addresses])] if not tx_df.empty else pd.DataFrame()
-        if not tx_sel.empty:
-            def _tx(row):
+        # Transações gerais
+        st.subheader("🧾 Transações (após filtros)")
+        if not tx_df.empty:
+            def _tx_link(row):
                 base = EXPLORERS.get(int(row["chain_id"]), "")
                 return f"{base}/tx/{row['hash']}" if base and row["hash"] else None
-            tx_sel = tx_sel.copy()
-            tx_sel["Tx"] = tx_sel.apply(_tx, axis=1)
-            nice = tx_sel.rename(columns={
+            tx_df = tx_df.copy()
+            tx_df["Tx"] = tx_df.apply(_tx_link, axis=1)
+            nice = tx_df.rename(columns={
                 "chain":"Rede","timestamp_human":"Data/Hora","direction_chip":"Direção",
-                "from":"De","to":"Para","value_usd":"Valor (USD)","fees_usd":"Taxa (USD)"
+                "from":"De","to":"Para","value_usd":"Valor (USD)","fees_usd":"Taxa (USD)",
             })[["Rede","Tx","Data/Hora","Direção","De","Para","Valor (USD)","Taxa (USD)"]]
-            st.markdown("**Últimas transações desse token**")
-            st.dataframe(nice, use_container_width=True, hide_index=True, column_config={
-                "Tx": st.column_config.LinkColumn("Hash", display_text="Abrir"),
-                "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-                "Taxa (USD)": st.column_config.NumberColumn("Taxa (USD)", format="$%.4f"),
-            })
+            nice["Valor (USD)"] = nice["Valor (USD)"].apply(fmt_usd)
+            nice["Taxa (USD)"] = nice["Taxa (USD)"].apply(lambda v: fmt_usd(v, 4))
+            st.dataframe(nice, use_container_width=True, hide_index=True,
+                         column_config={"Tx": st.column_config.LinkColumn("Hash", display_text="Abrir")})
         else:
-            st.info("Sem transações recentes para esse token (dentro do período e redes filtradas).")
-
-    # Transações gerais
-    st.subheader("🧾 Transações (após filtros)")
-    if not tx_df.empty:
-        def _tx_link(row):
-            base = EXPLORERS.get(int(row["chain_id"]), "")
-            return f"{base}/tx/{row['hash']}" if base and row["hash"] else None
-        tx_df = tx_df.copy()
-        tx_df["Tx"] = tx_df.apply(_tx_link, axis=1)
-        nice = tx_df.rename(columns={
-            "chain":"Rede","timestamp_human":"Data/Hora","direction_chip":"Direção",
-            "from":"De","to":"Para","value_usd":"Valor (USD)","fees_usd":"Taxa (USD)",
-        })[["Rede","Tx","Data/Hora","Direção","De","Para","Valor (USD)","Taxa (USD)"]]
-        st.dataframe(nice, use_container_width=True, hide_index=True, column_config={
-            "Tx": st.column_config.LinkColumn("Hash", display_text="Abrir"),
-            "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-            "Taxa (USD)": st.column_config.NumberColumn("Taxa (USD)", format="$%.4f"),
-        })
+            st.info("Nenhuma transação encontrada (após filtros).")
     else:
-        st.info("Nenhuma transação encontrada (após filtros).")
+        st.error("Endereço/TX inválido. Use 0x... (EVM), bc1/1/3 (BTC) ou TXID BTC.")
 
 # ==========================
-# DESCOBERTA — SEMPRE VISÍVEL
+# DESCOBERTA — SEMPRE VISÍVEL (igual ao seu)
 # ==========================
 st.markdown("---")
 st.header("🔎 Descoberta (Top Gainers → DexScreener → Holders → DeBank)")
 
-COINGECKO_PLATFORM = {
-    1: "ethereum",
-    56: "binance-smart-chain",
-    137: "polygon-pos",
-    42161: "arbitrum-one",
-    10: "optimistic-ethereum",
-    8453: "base",
-    43114: "avalanche",
-    250: "fantom",
-}
-DEX_CHAIN_SLUG = {
-    1: "ethereum",
-    56: "bsc",
-    137: "polygon",
-    42161: "arbitrum",
-    10: "optimism",
-    8453: "base",
-    43114: "avalanche",
-    250: "fantom",
-}
-
-# ===== CoinGecko — Top gainers com backoff/cache =====
 @st.cache_data(ttl=300, show_spinner=False)
 def cg_top_gainers(period: str, limit=50) -> pd.DataFrame:
     valid = {"1h":"1h","24h":"24h","7d":"7d","14d":"14d","30d":"30d","200d":"200d","1y":"1y"}
@@ -663,7 +879,7 @@ def ds_recent_trades(chain_id: int, pair_addr: str) -> pd.DataFrame:
         except Exception:
             ts = None
         rows.append({
-            "time": _human(ts) if ts else "",
+            "time": _human_iso(ts) if ts else "",
             "type": (t.get("type") or "").upper(),
             "priceUsd": float(t.get("priceUsd") or 0),
             "amount": float(t.get("amount") or 0),
@@ -691,7 +907,6 @@ def top_holders_covalent(chain_id: int, contract: str, page_size: int = 50) -> p
     return pd.DataFrame(rows).sort_values("value_usd", ascending=False, ignore_index=True)
 
 # Config Descoberta
-st.subheader("Configuração de busca")
 cfg1, cfg2, cfg3 = st.columns([0.4, 0.3, 0.3])
 with cfg1:
     period = st.selectbox("Período (CoinGecko)", ["1h","24h","7d","14d","30d","200d","1y"], index=1, key="cg_period")
@@ -718,13 +933,13 @@ with left:
                 "logo":"Logo","name":"Nome","symbol":"Ticker","price":"Preço (USD)",
                 "chg":f"% {period}","mcap":"Mkt Cap"
             })[["Logo","Nome","Ticker","Preço (USD)",f"% {period}","Mkt Cap","Página","Contrato"]]
+            table["Preço (USD)"] = table["Preço (USD)"].apply(fmt_usd_precise)
+            table["Mkt Cap"] = table["Mkt Cap"].apply(lambda v: fmt_usd(v,0))
             st.dataframe(
                 table,
                 column_config={
                     "Logo": st.column_config.ImageColumn(""),
-                    "Preço (USD)": st.column_config.NumberColumn("Preço (USD)", format="$%.6f"),
                     f"% {period}": st.column_config.NumberColumn(f"% {period}", format="%.2f%%"),
-                    "Mkt Cap": st.column_config.NumberColumn("Mkt Cap", format="$%.0f"),
                     "Página": st.column_config.LinkColumn("CoinGecko", display_text="Abrir"),
                     "Contrato": st.column_config.LinkColumn("Contrato", display_text="Abrir"),
                 },
@@ -762,9 +977,7 @@ with right:
 contract = st.session_state.get("_discover_contract")
 chain_id_discover = st.session_state.get("_discover_chain")
 
-# ==========================
 # 3) PARES & TRADES (TOP 2)
-# ==========================
 if contract and chain_id_discover:
     st.subheader("3) DexScreener — Pares & Trades")
     trades_limit = st.slider("Qtd. de trades por par", 10, 200, 50, 10, key="trades_limit")
@@ -774,19 +987,18 @@ if contract and chain_id_discover:
         if df_pairs.empty:
             st.info("Nenhum par encontrado para esse contrato na DexScreener.")
         else:
-            st.dataframe(
-                df_pairs.rename(columns={
+            show_pairs = df_pairs.rename(columns={
                     "pair":"Pair","dex":"DEX","base":"Base","quote":"Quote",
                     "priceUsd":"Preço","liqUsd":"Liquidez","vol24":"Vol 24h",
                     "tx24":"TX 24h","url":"Link"
-                })[["DEX","Base","Quote","Preço","Liquidez","Vol 24h","TX 24h","Link"]],
-                column_config={
-                    "Preço": st.column_config.NumberColumn("Preço", format="$%.8f"),
-                    "Liquidez": st.column_config.NumberColumn("Liquidez", format="$%.0f"),
-                    "Vol 24h": st.column_config.NumberColumn("Vol 24h", format="$%.0f"),
-                    "TX 24h": st.column_config.NumberColumn("TX 24h", format="%d"),
-                    "Link": st.column_config.LinkColumn("Par", display_text="Abrir"),
-                },
+                })[["DEX","Base","Quote","Preço","Liquidez","Vol 24h","TX 24h","Link"]]
+            show_pairs["Preço"] = show_pairs["Preço"].apply(fmt_usd_precise)
+            show_pairs["Liquidez"] = show_pairs["Liquidez"].apply(lambda v: fmt_usd(v,0))
+            show_pairs["Vol 24h"] = show_pairs["Vol 24h"].apply(lambda v: fmt_usd(v,0))
+
+            st.dataframe(
+                show_pairs,
+                column_config={"Link": st.column_config.LinkColumn("Par", display_text="Abrir")},
                 hide_index=True,
                 use_container_width=True
             )
@@ -820,7 +1032,7 @@ if contract and chain_id_discover:
                     k1, k2, k3 = st.columns(3)
                     k1.metric("Trades (janela)", f"{len(df_top):,}")
                     k2.metric("Buys / Sells", f"{buys} / {sells}")
-                    k3.metric("Volume USD (janela)", f"${vol_usd:,.0f}")
+                    k3.metric("Volume USD (janela)", fmt_usd(vol_usd,0))
 
                     def _tx_link(txid: str):
                         base_scan = EXPLORERS.get(int(chain_id_discover), "")
@@ -829,17 +1041,16 @@ if contract and chain_id_discover:
                     df_top = df_top.copy()
                     df_top["TxLink"] = df_top["tx"].map(_tx_link)
 
-                    st.dataframe(
-                        df_top.rename(columns={
+                    df_show = df_top.rename(columns={
                             "time":"Data/Hora","type":"Tipo","priceUsd":"Preço","amount":"Qtd Base",
                             "totalUsd":"Total USD","tx":"Tx"
-                        })[["Data/Hora","Tipo","Preço","Qtd Base","Total USD","TxLink"]],
-                        column_config={
-                            "Preço": st.column_config.NumberColumn("Preço", format="$%.8f"),
-                            "Qtd Base": st.column_config.NumberColumn("Qtd Base", format="%.6f"),
-                            "Total USD": st.column_config.NumberColumn("Total USD", format="$%.2f"),
-                            "TxLink": st.column_config.LinkColumn("Tx", display_text="Abrir"),
-                        },
+                        })[["Data/Hora","Tipo","Preço","Qtd Base","Total USD","TxLink"]]
+                    df_show["Preço"] = df_show["Preço"].apply(fmt_usd_precise)
+                    df_show["Qtd Base"] = df_show["Qtd Base"].apply(lambda v: fmt_amt(v,6))
+                    df_show["Total USD"] = df_show["Total USD"].apply(fmt_usd)
+                    st.dataframe(
+                        df_show,
+                        column_config={"TxLink": st.column_config.LinkColumn("Tx", display_text="Abrir")},
                         hide_index=True,
                         use_container_width=True,
                         height=300,
@@ -847,9 +1058,7 @@ if contract and chain_id_discover:
     except Exception as e:
         st.warning(f"DexScreener: {e}")
 
-# ==========================
-# 4) Top holders + DeBank (inclui consulta manual)
-# ==========================
+# 4) Top holders + DeBank
 st.subheader("4) Top holders (Covalent) + DeBank")
 
 st.markdown("**Consultar qualquer carteira no DeBank**")
@@ -900,13 +1109,13 @@ if st.button("Buscar tokens dessa carteira", key="btn_debank_manual"):
                 "logo":"Logo","token":"Ticker","name":"Nome","token_address":"Contrato",
                 "amount":"Quantidade","price_usd":"Preço (USD)","value_usd":"Valor (USD)",
             })[["Logo","Ticker","Nome","Contrato","Quantidade","Preço (USD)","Valor (USD)","Explorer"]]
+            nice_any["Quantidade"] = nice_any["Quantidade"].apply(lambda v: fmt_amt(v,6))
+            nice_any["Preço (USD)"] = nice_any["Preço (USD)"].apply(fmt_usd_precise)
+            nice_any["Valor (USD)"] = nice_any["Valor (USD)"].apply(fmt_usd)
             st.dataframe(
                 nice_any, use_container_width=True, hide_index=True, height=380,
                 column_config={
                     "Logo": st.column_config.ImageColumn(""),
-                    "Quantidade": st.column_config.NumberColumn("Quantidade", format="%.6f"),
-                    "Preço (USD)": st.column_config.NumberColumn("Preço (USD)", format="$%.6f"),
-                    "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
                     "Explorer": st.column_config.LinkColumn("Scan", display_text="Abrir"),
                 },
             )
@@ -922,14 +1131,13 @@ try:
         else:
             df_h = df_h.copy()
             df_h["DeBank"] = df_h["address"].map(lambda a: f"https://debank.com/profile/{a}")
+            show_h = df_h.rename(columns={"address":"Holder","balance":"Saldo (raw)","value_usd":"Valor (USD)","DeBank":"DeBank"})[
+                ["Holder","Valor (USD)","DeBank"]
+            ]
+            show_h["Valor (USD)"] = show_h["Valor (USD)"].apply(fmt_usd)
             st.dataframe(
-                df_h.rename(columns={"address":"Holder","balance":"Saldo (raw)","value_usd":"Valor (USD)","DeBank":"DeBank"})[
-                    ["Holder","Valor (USD)","DeBank"]
-                ],
-                column_config={
-                    "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
-                    "DeBank": st.column_config.LinkColumn("DeBank", display_text="Abrir"),
-                },
+                show_h,
+                column_config={"DeBank": st.column_config.LinkColumn("DeBank", display_text="Abrir")},
                 hide_index=True, use_container_width=True, height=320,
             )
 
@@ -951,13 +1159,13 @@ try:
                             "logo":"Logo","token":"Ticker","name":"Nome","token_address":"Contrato",
                             "amount":"Quantidade","price_usd":"Preço (USD)","value_usd":"Valor (USD)",
                         })[["Logo","Ticker","Nome","Contrato","Quantidade","Preço (USD)","Valor (USD)","Explorer"]]
+                        nice["Quantidade"] = nice["Quantidade"].apply(lambda v: fmt_amt(v,6))
+                        nice["Preço (USD)"] = nice["Preço (USD)"].apply(fmt_usd_precise)
+                        nice["Valor (USD)"] = nice["Valor (USD)"].apply(fmt_usd)
                         st.dataframe(
                             nice, use_container_width=True, hide_index=True, height=360,
                             column_config={
                                 "Logo": st.column_config.ImageColumn(""),
-                                "Quantidade": st.column_config.NumberColumn("Quantidade", format="%.6f"),
-                                "Preço (USD)": st.column_config.NumberColumn("Preço (USD)", format="$%.6f"),
-                                "Valor (USD)": st.column_config.NumberColumn("Valor (USD)", format="$%.2f"),
                                 "Explorer": st.column_config.LinkColumn("Scan", display_text="Abrir"),
                             },
                         )
@@ -966,4 +1174,4 @@ try:
 except Exception as e:
     st.warning(f"Covalent/DeBank: {e}")
 
-st.caption(f"Período p/ TXs: **{preset_label}** | Valor mínimo: **${min_usd:.2f}** | Atualizado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Período p/ TXs: **{preset_label}** | Valor mínimo: **{fmt_usd(min_usd,2)}** | Atualizado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
